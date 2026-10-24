@@ -378,15 +378,6 @@ void Command::execute()
         return;
     }
 
-    if (n > 1)
-    {
-        fprintf(stderr, "myshell: pipes are not implemented yet\n");
-        clear();
-        return;
-    }
-
-    char **args = _simpleCommands[0]->_arguments;
-
     /* ---- open the redirection files (in the parent, so that an error
           such as "no such file" is reported once and nothing is started) ---- */
     int infd = -1, outfd = -1, errfd = -1;
@@ -438,33 +429,79 @@ void Command::execute()
         }
     }
 
-    pid_t pid = fork();
-    if (pid < 0)
+    /* ---- one pipe between every two neighbouring commands ---- */
+    std::vector<int> pipeFds(2 * (n > 1 ? n - 1 : 0));
+    for (int i = 0; i < n - 1; i++)
     {
-        perror("myshell: fork");
+        if (pipe(&pipeFds[2 * i]) < 0)
+        {
+            perror("myshell: pipe");
+            for (int k = 0; k < 2 * i; k++)
+                close(pipeFds[k]);
+            closeRedirects();
+            clear();
+            return;
+        }
     }
-    else if (pid == 0) // child
-    {
-        // redirect BEFORE execvp: the new program inherits the descriptors
-        if (infd >= 0)
-            dup2(infd, 0);
-        if (outfd >= 0)
-            dup2(outfd, 1);
-        if (errfd >= 0)
-            dup2(errfd, 2);
-        closeRedirects(); // the originals are not needed any more
 
-        execvp(args[0], args);
-        fprintf(stderr, "myshell: %s: %s\n", args[0], strerror(errno));
-        _exit(127);
-    }
-    else if (!_background)
+    /* ---- one child per simple command ---- */
+    pid_t lastPid = -1;
+    for (int i = 0; i < n; i++)
     {
-        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+        pid_t pid = fork();
+
+        if (pid < 0)
+        {
+            perror("myshell: fork");
+            break;
+        }
+
+        if (pid == 0) // ---------------- child ----------------
+        {
+            // stdin : first command <- file, the others <- previous pipe
+            if (i == 0 && infd >= 0)
+                dup2(infd, 0);
+            else if (i > 0)
+                dup2(pipeFds[2 * (i - 1)], 0);
+
+            // stdout : last command -> file, the others -> next pipe
+            if (i == n - 1 && outfd >= 0)
+                dup2(outfd, 1);
+            else if (i < n - 1)
+                dup2(pipeFds[2 * i + 1], 1);
+
+            // stderr : every command of the line
+            if (errfd >= 0)
+                dup2(errfd, 2);
+
+            // Close every original descriptor. If one write end stayed open
+            // somewhere, the reader (grep, wc ...) would never see EOF and hang.
+            for (int fd : pipeFds)
+                close(fd);
+            closeRedirects();
+
+            execvp(_simpleCommands[i]->_arguments[0], _simpleCommands[i]->_arguments);
+
+            // only reached if execvp failed
+            fprintf(stderr, "myshell: %s: %s\n", _simpleCommands[i]->_arguments[0], strerror(errno));
+            _exit(127); // _exit, not exit: don't flush the parent's copied stdio buffers
+        }
+
+        lastPid = pid; // ---------------- parent ----------------
+    }
+
+    // The parent must close its copies too (same EOF reason as above).
+    for (int fd : pipeFds)
+        close(fd);
+    closeRedirects();
+
+    if (!_background && lastPid > 0)
+    {
+        int status;
+        while (waitpid(lastPid, &status, 0) < 0 && errno == EINTR)
             ;
     }
 
-    closeRedirects(); // parent closes its copies too
     clear();
 }
 

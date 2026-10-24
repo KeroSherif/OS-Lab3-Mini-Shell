@@ -387,24 +387,84 @@ void Command::execute()
 
     char **args = _simpleCommands[0]->_arguments;
 
+    /* ---- open the redirection files (in the parent, so that an error
+          such as "no such file" is reported once and nothing is started) ---- */
+    int infd = -1, outfd = -1, errfd = -1;
+
+    auto closeRedirects = [&]()
+    {
+        if (infd >= 0) close(infd);
+        if (outfd >= 0) close(outfd);
+        if (errfd >= 0 && errfd != outfd) close(errfd); // >>& : same descriptor twice
+        infd = outfd = errfd = -1;
+    };
+
+    if (_inputFile)
+    {
+        infd = open(_inputFile, O_RDONLY | O_CLOEXEC);
+        if (infd < 0)
+        {
+            fprintf(stderr, "myshell: %s: %s\n", _inputFile, strerror(errno));
+            clear();
+            return;
+        }
+    }
+    if (_outFile)
+    {
+        int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (_append ? O_APPEND : O_TRUNC);
+        outfd = open(_outFile, flags, 0644);
+        if (outfd < 0)
+        {
+            fprintf(stderr, "myshell: %s: %s\n", _outFile, strerror(errno));
+            closeRedirects();
+            clear();
+            return;
+        }
+    }
+    if (_errFile)
+    {
+        if (_out_error)
+            errfd = outfd; // >>& : stderr shares the same open file as stdout
+        else
+        {
+            errfd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+            if (errfd < 0)
+            {
+                fprintf(stderr, "myshell: %s: %s\n", _errFile, strerror(errno));
+                closeRedirects();
+                clear();
+                return;
+            }
+        }
+    }
+
     pid_t pid = fork();
     if (pid < 0)
     {
         perror("myshell: fork");
     }
-    else if (pid == 0) // child: become the program
+    else if (pid == 0) // child
     {
+        // redirect BEFORE execvp: the new program inherits the descriptors
+        if (infd >= 0)
+            dup2(infd, 0);
+        if (outfd >= 0)
+            dup2(outfd, 1);
+        if (errfd >= 0)
+            dup2(errfd, 2);
+        closeRedirects(); // the originals are not needed any more
+
         execvp(args[0], args);
-        // only reached if execvp failed
         fprintf(stderr, "myshell: %s: %s\n", args[0], strerror(errno));
-        _exit(127); // _exit, not exit: don't flush the parent's copied stdio buffers
+        _exit(127);
     }
-    else if (!_background) // parent: wait only for foreground commands
+    else if (!_background)
     {
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
             ;
     }
 
+    closeRedirects(); // parent closes its copies too
     clear();
 }
 

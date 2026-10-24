@@ -45,10 +45,26 @@ static void freeSimpleCommand(SimpleCommand *sc)
     delete sc;
 }
 
-// Insert one word into a SimpleCommand.
+// Insert one word into a SimpleCommand. Unquoted words that contain * or ?
+// (and are not the program name) are expanded with glob() -> bonus part.
 static void addWord(SimpleCommand *sc, const std::string &value, bool quoted)
 {
-    (void)quoted; // used later by the wildcard (bonus) commit
+    bool isProgramName = (sc->_numberOfArguments == 0);
+
+    if (!quoted && !isProgramName && strpbrk(value.c_str(), "*?"))
+    {
+        glob_t g;
+        memset(&g, 0, sizeof g);
+        // GLOB_NOCHECK: if nothing matches, keep the pattern as it is
+        if (glob(value.c_str(), GLOB_NOCHECK, NULL, &g) == 0)
+        {
+            for (size_t k = 0; k < g.gl_pathc; k++)
+                sc->insertArgument(strdup(g.gl_pathv[k]));
+            globfree(&g);
+            return;
+        }
+        globfree(&g);
+    }
     // strdup: clear() calls free() on every argument, so they must be heap copies
     sc->insertArgument(strdup(value.c_str()));
 }

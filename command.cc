@@ -365,6 +365,28 @@ void Command::print()
     printf("\n\n");
 }
 
+// cd [dir] : runs inside the shell process (a child's chdir would be lost)
+static void builtinCd(SimpleCommand *sc)
+{
+    if (sc->_numberOfArguments > 2)
+    {
+        fprintf(stderr, "cd: too many arguments\n");
+        return;
+    }
+
+    const char *dir = (sc->_numberOfArguments == 2) ? sc->_arguments[1] : getenv("HOME");
+    if (dir && strcmp(dir, "~") == 0)
+        dir = getenv("HOME");
+
+    if (!dir)
+    {
+        fprintf(stderr, "cd: HOME is not set\n");
+        return;
+    }
+    if (chdir(dir) != 0)
+        fprintf(stderr, "cd: %s: %s\n", dir, strerror(errno));
+}
+
 void Command::execute()
 {
 #ifndef NO_TABLE
@@ -376,6 +398,24 @@ void Command::execute()
     {
         clear();
         return;
+    }
+
+    /* ---- built-ins: executed by the shell itself, NO fork ---- */
+    if (n == 1)
+    {
+        char **args = _simpleCommands[0]->_arguments;
+        if (strcmp(args[0], "exit") == 0)
+        {
+            printf("Good bye!!\n");
+            clear();
+            exit(0);
+        }
+        if (strcmp(args[0], "cd") == 0)
+        {
+            builtinCd(_simpleCommands[0]);
+            clear();
+            return;
+        }
     }
 
     /* ---- open the redirection files (in the parent, so that an error
@@ -458,6 +498,10 @@ void Command::execute()
 
         if (pid == 0) // ---------------- child ----------------
         {
+            // The shell ignores Ctrl-C, and "ignored" survives execvp, so the
+            // child must go back to the default action or it could not be killed.
+            signal(SIGINT, SIG_DFL);
+
             // stdin : first command <- file, the others <- previous pipe
             if (i == 0 && infd >= 0)
                 dup2(infd, 0);
@@ -520,6 +564,9 @@ SimpleCommand *Command::_currentSimpleCommand;
 
 int main()
 {
+    // Ctrl-C must not kill the shell
+    signal(SIGINT, SIG_IGN);
+
     std::string input;
     while (true)
     {

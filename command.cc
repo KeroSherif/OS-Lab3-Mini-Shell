@@ -33,6 +33,8 @@
 /* 1. helpers                                                          */
 /* ------------------------------------------------------------------ */
 
+static int logFd = -1; // log file, opened once in main()
+
 // SimpleCommand is created with `new`, so it must be released with `delete`
 // (the original clear() used free(), which is wrong for new-allocated memory).
 static void freeSimpleCommand(SimpleCommand *sc)
@@ -49,6 +51,69 @@ static void addWord(SimpleCommand *sc, const std::string &value, bool quoted)
     (void)quoted; // used later by the wildcard (bonus) commit
     // strdup: clear() calls free() on every argument, so they must be heap copies
     sc->insertArgument(strdup(value.c_str()));
+}
+
+// ---- SIGCHLD handler: reaps every finished child and logs it -----------
+// Inside a signal handler we only use async-signal-safe calls (waitpid, write),
+// so the message is built by hand instead of using printf/snprintf.
+static size_t putStr(char *buf, const char *s)
+{
+    size_t k = 0;
+    while (s[k]) { buf[k] = s[k]; k++; }
+    return k;
+}
+
+static size_t putNum(char *buf, long v)
+{
+    char tmp[24];
+    int len = 0;
+    bool neg = v < 0;
+    unsigned long u = neg ? 0UL - (unsigned long)v : (unsigned long)v;
+    do { tmp[len++] = '0' + (u % 10); u /= 10; } while (u);
+    size_t k = 0;
+    if (neg) buf[k++] = '-';
+    while (len) buf[k++] = tmp[--len];
+    return k;
+}
+
+// Write one log line for a finished child. Only async-signal-safe calls.
+static void logChild(pid_t pid, int status)
+{
+    if (logFd < 0)
+        return;
+
+    char buf[128];
+    size_t n = 0;
+    n += putStr(buf + n, "Child process ");
+    n += putNum(buf + n, pid);
+    if (WIFEXITED(status))
+    {
+        n += putStr(buf + n, " terminated, exit status ");
+        n += putNum(buf + n, WEXITSTATUS(status));
+    }
+    else if (WIFSIGNALED(status))
+    {
+        n += putStr(buf + n, " killed by signal ");
+        n += putNum(buf + n, WTERMSIG(status));
+    }
+    else
+    {
+        n += putStr(buf + n, " terminated");
+    }
+    buf[n++] = '\n';
+    (void)!write(logFd, buf, n);
+}
+
+static void onChildExit(int)
+{
+    int saved = errno; // handlers must not clobber errno of the interrupted code
+    int status;
+    pid_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
+        logChild(pid, status);
+
+    errno = saved;
 }
 
 /* ------------------------------------------------------------------ */
@@ -501,6 +566,7 @@ void Command::execute()
             // The shell ignores Ctrl-C, and "ignored" survives execvp, so the
             // child must go back to the default action or it could not be killed.
             signal(SIGINT, SIG_DFL);
+            signal(SIGCHLD, SIG_DFL);
 
             // stdin : first command <- file, the others <- previous pipe
             if (i == 0 && infd >= 0)
@@ -542,8 +608,14 @@ void Command::execute()
     if (!_background && lastPid > 0)
     {
         int status;
-        while (waitpid(lastPid, &status, 0) < 0 && errno == EINTR)
+        pid_t r;
+        // EINTR -> retry. ECHILD is fine: the SIGCHLD handler already reaped
+        // (and logged) it. Whoever reaps a child is the one who logs it, so
+        // every child ends up in the log exactly once.
+        while ((r = waitpid(lastPid, &status, 0)) < 0 && errno == EINTR)
             ;
+        if (r == lastPid)
+            logChild(r, status);
     }
 
     clear();
@@ -566,6 +638,20 @@ int main()
 {
     // Ctrl-C must not kill the shell
     signal(SIGINT, SIG_IGN);
+
+    // log file; O_CLOEXEC so the children we exec don't inherit it
+    logFd = open("myshell.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (logFd < 0)
+        perror("myshell: cannot open myshell.log");
+
+    // log every terminated child. SA_RESTART: getline()/waitpid() are
+    // restarted automatically instead of failing with EINTR.
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = onChildExit;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
 
     std::string input;
     while (true)

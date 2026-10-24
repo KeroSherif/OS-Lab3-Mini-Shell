@@ -1,14 +1,3 @@
-
-/*
- * CC373 - Lab 3 : Mini shell
- *
- * Layout of this file:
- *   1. helpers            (freeing, wildcard expansion, SIGCHLD log handler)
- *   2. parse()            tokens  -> Command table        (Part 1)
- *   3. Command methods    table   -> real processes       (Parts 2 + 3)
- *   4. main()             signals + read/parse/execute loop
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -18,25 +7,16 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <time.h>
 #include <glob.h>
-#include <wordexp.h>
 #include <vector>
 #include <string>
-#include <cctype>
 #include <iostream>
-#include <sstream>
 #include "command.h"
 #include "tokenizer.h"
 
-/* ------------------------------------------------------------------ */
-/* 1. helpers                                                          */
-/* ------------------------------------------------------------------ */
+// Helpers
+static int logFd = -1;
 
-static int logFd = -1; // log file, opened once in main()
-
-// SimpleCommand is created with `new`, so it must be released with `delete`
-// (the original clear() used free(), which is wrong for new-allocated memory).
 static void freeSimpleCommand(SimpleCommand *sc)
 {
     for (int j = 0; j < sc->_numberOfArguments; j++)
@@ -45,8 +25,6 @@ static void freeSimpleCommand(SimpleCommand *sc)
     delete sc;
 }
 
-// Insert one word into a SimpleCommand. Unquoted words that contain * or ?
-// (and are not the program name) are expanded with glob() -> bonus part.
 static void addWord(SimpleCommand *sc, const std::string &value, bool quoted)
 {
     bool isProgramName = (sc->_numberOfArguments == 0);
@@ -55,7 +33,7 @@ static void addWord(SimpleCommand *sc, const std::string &value, bool quoted)
     {
         glob_t g;
         memset(&g, 0, sizeof g);
-        // GLOB_NOCHECK: if nothing matches, keep the pattern as it is
+
         if (glob(value.c_str(), GLOB_NOCHECK, NULL, &g) == 0)
         {
             for (size_t k = 0; k < g.gl_pathc; k++)
@@ -65,13 +43,10 @@ static void addWord(SimpleCommand *sc, const std::string &value, bool quoted)
         }
         globfree(&g);
     }
-    // strdup: clear() calls free() on every argument, so they must be heap copies
+
     sc->insertArgument(strdup(value.c_str()));
 }
 
-// ---- SIGCHLD handler: reaps every finished child and logs it -----------
-// Inside a signal handler we only use async-signal-safe calls (waitpid, write),
-// so the message is built by hand instead of using printf/snprintf.
 static size_t putStr(char *buf, const char *s)
 {
     size_t k = 0;
@@ -92,7 +67,7 @@ static size_t putNum(char *buf, long v)
     return k;
 }
 
-// Write one log line for a finished child. Only async-signal-safe calls.
+// Child log (SIGCHLD)
 static void logChild(pid_t pid, int status)
 {
     if (logFd < 0)
@@ -122,7 +97,7 @@ static void logChild(pid_t pid, int status)
 
 static void onChildExit(int)
 {
-    int saved = errno; // handlers must not clobber errno of the interrupted code
+    int saved = errno;
     int status;
     pid_t pid;
 
@@ -132,14 +107,7 @@ static void onChildExit(int)
     errno = saved;
 }
 
-/* ------------------------------------------------------------------ */
-/* 2. parse()  : tokens -> Command table                               */
-/* ------------------------------------------------------------------ */
-
-// The given tokenizer splits on spaces only, so  echo "Hello, World!"  arrives as
-// two tokens:  "Hello,   and   World!"   (quotes still attached).
-// Here we glue them back into ONE word and strip the quotes. Words that were
-// quoted are remembered so that wildcards are not expanded inside them.
+// Parse
 struct Item
 {
     TokenType type;
@@ -157,7 +125,7 @@ static bool mergeQuotes(const std::vector<Token> &raw, std::vector<Item> &out)
         if (t.type != TOKEN_EOF && (q == '"' || q == '\''))
         {
             std::string text = t.value;
-            // the span is closed when the accumulated text ends with the same quote
+
             while (!(text.size() >= 2 && text.back() == q))
             {
                 if (++i >= raw.size() || raw[i].type == TOKEN_EOF)
@@ -183,11 +151,9 @@ void parse(std::vector<Token> &rawTokens)
     if (!mergeQuotes(rawTokens, tokens))
         return;
 
-    Command &cmd = Command::_currentCommand; // the real table (not a local copy)
-    SimpleCommand *sc = new SimpleCommand(); // simple command being built
+    Command &cmd = Command::_currentCommand;
+    SimpleCommand *sc = new SimpleCommand();
 
-    // On any syntax error: print the message, throw away the half-built
-    // table and go back to the prompt without executing anything.
     auto fail = [&](const char *msg)
     {
         fprintf(stderr, "myshell: %s\n", msg);
@@ -195,8 +161,6 @@ void parse(std::vector<Token> &rawTokens)
         cmd.clear();
     };
 
-    // The word after > >> < 2> >>&  is a file name. Returns NULL (after
-    // reporting the error) if there is none, e.g.  "ls >"  or  "ls > | wc".
     auto fileAfter = [&](size_t i, const char *op) -> const Item *
     {
         if (i + 1 >= tokens.size() ||
@@ -250,7 +214,7 @@ void parse(std::vector<Token> &rawTokens)
             }
             cmd._outFile = strdup(f->value.c_str());
             cmd._append = (t.type == TOKEN_APPEND);
-            i++; // the file name is consumed
+            i++;
             break;
         }
 
@@ -296,7 +260,7 @@ void parse(std::vector<Token> &rawTokens)
                 fail("ambiguous output redirect");
                 return;
             }
-            // stdout AND stderr go (appended) to the same file
+
             cmd._outFile = strdup(f->value.c_str());
             cmd._errFile = strdup(f->value.c_str());
             cmd._out_error = 1;
@@ -306,7 +270,7 @@ void parse(std::vector<Token> &rawTokens)
         }
 
         case TOKEN_BACKGROUND:
-            if (tokens[i + 1].type != TOKEN_EOF) // i+1 always exists: EOF is the last token
+            if (tokens[i + 1].type != TOKEN_EOF)
             {
                 fail("syntax error: '&' must be the last token on the line");
                 return;
@@ -319,7 +283,6 @@ void parse(std::vector<Token> &rawTokens)
         }
     }
 
-    // End of line: store the last simple command (if it has any words)
     if (sc->_numberOfArguments > 0)
     {
         cmd.insertSimpleCommand(sc);
@@ -328,7 +291,7 @@ void parse(std::vector<Token> &rawTokens)
     {
         bool emptyLine = cmd._numberOfSimpleCommands == 0 && !cmd._outFile &&
                          !cmd._inputFile && !cmd._errFile && !cmd._background;
-        if (emptyLine) // user just pressed Enter
+        if (emptyLine)
         {
             freeSimpleCommand(sc);
             return;
@@ -341,10 +304,7 @@ void parse(std::vector<Token> &rawTokens)
     cmd.execute();
 }
 
-/* ------------------------------------------------------------------ */
-/* 3. Command / SimpleCommand                                          */
-/* ------------------------------------------------------------------ */
-
+// Command table
 SimpleCommand::SimpleCommand()
 {
     _numberOfAvailableArguments = 5;
@@ -362,7 +322,7 @@ void SimpleCommand::insertArgument(char *argument)
     }
 
     _arguments[_numberOfArguments] = argument;
-    _arguments[_numberOfArguments + 1] = NULL; // execvp needs a NULL-terminated array
+    _arguments[_numberOfArguments + 1] = NULL;
 
     _numberOfArguments++;
 }
@@ -370,8 +330,7 @@ void SimpleCommand::insertArgument(char *argument)
 Command::Command()
 {
     _numberOfAvailableSimpleCommands = 1;
-    // BUG FIX: the original used _numberOfSimpleCommands here, which was not
-    // initialised yet (garbage size).
+
     _simpleCommands = (SimpleCommand **)
         malloc(_numberOfAvailableSimpleCommands * sizeof(SimpleCommand *));
 
@@ -380,8 +339,8 @@ Command::Command()
     _inputFile = 0;
     _errFile = 0;
     _background = 0;
-    _out_error = 0; // BUG FIX: was never initialised
-    _append = 0;    // BUG FIX: was never initialised
+    _out_error = 0;
+    _append = 0;
 }
 
 void Command::insertSimpleCommand(SimpleCommand *simpleCommand)
@@ -433,7 +392,7 @@ void Command::print()
         {
             printf("\"%s\" \t", _simpleCommands[i]->_arguments[j]);
         }
-        printf("\n"); // one row per simple command (so pipes are readable)
+        printf("\n");
     }
 
     printf("\n\n");
@@ -446,7 +405,7 @@ void Command::print()
     printf("\n\n");
 }
 
-// cd [dir] : runs inside the shell process (a child's chdir would be lost)
+// Execute
 static void builtinCd(SimpleCommand *sc)
 {
     if (sc->_numberOfArguments > 2)
@@ -481,7 +440,7 @@ void Command::execute()
         return;
     }
 
-    /* ---- built-ins: executed by the shell itself, NO fork ---- */
+    
     if (n == 1)
     {
         char **args = _simpleCommands[0]->_arguments;
@@ -499,15 +458,14 @@ void Command::execute()
         }
     }
 
-    /* ---- open the redirection files (in the parent, so that an error
-          such as "no such file" is reported once and nothing is started) ---- */
+    
     int infd = -1, outfd = -1, errfd = -1;
 
     auto closeRedirects = [&]()
     {
         if (infd >= 0) close(infd);
         if (outfd >= 0) close(outfd);
-        if (errfd >= 0 && errfd != outfd) close(errfd); // >>& : same descriptor twice
+        if (errfd >= 0 && errfd != outfd) close(errfd);
         infd = outfd = errfd = -1;
     };
 
@@ -536,7 +494,7 @@ void Command::execute()
     if (_errFile)
     {
         if (_out_error)
-            errfd = outfd; // >>& : stderr shares the same open file as stdout
+            errfd = outfd;
         else
         {
             errfd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -550,7 +508,7 @@ void Command::execute()
         }
     }
 
-    /* ---- one pipe between every two neighbouring commands ---- */
+    
     std::vector<int> pipeFds(2 * (n > 1 ? n - 1 : 0));
     for (int i = 0; i < n - 1; i++)
     {
@@ -565,7 +523,7 @@ void Command::execute()
         }
     }
 
-    /* ---- one child per simple command ---- */
+    
     pid_t lastPid = -1;
     for (int i = 0; i < n; i++)
     {
@@ -577,46 +535,38 @@ void Command::execute()
             break;
         }
 
-        if (pid == 0) // ---------------- child ----------------
+        if (pid == 0)
         {
-            // The shell ignores Ctrl-C, and "ignored" survives execvp, so the
-            // child must go back to the default action or it could not be killed.
+
             signal(SIGINT, SIG_DFL);
             signal(SIGCHLD, SIG_DFL);
 
-            // stdin : first command <- file, the others <- previous pipe
             if (i == 0 && infd >= 0)
                 dup2(infd, 0);
             else if (i > 0)
                 dup2(pipeFds[2 * (i - 1)], 0);
 
-            // stdout : last command -> file, the others -> next pipe
             if (i == n - 1 && outfd >= 0)
                 dup2(outfd, 1);
             else if (i < n - 1)
                 dup2(pipeFds[2 * i + 1], 1);
 
-            // stderr : every command of the line
             if (errfd >= 0)
                 dup2(errfd, 2);
 
-            // Close every original descriptor. If one write end stayed open
-            // somewhere, the reader (grep, wc ...) would never see EOF and hang.
             for (int fd : pipeFds)
                 close(fd);
             closeRedirects();
 
             execvp(_simpleCommands[i]->_arguments[0], _simpleCommands[i]->_arguments);
 
-            // only reached if execvp failed
             fprintf(stderr, "myshell: %s: %s\n", _simpleCommands[i]->_arguments[0], strerror(errno));
-            _exit(127); // _exit, not exit: don't flush the parent's copied stdio buffers
+            _exit(127);
         }
 
-        lastPid = pid; // ---------------- parent ----------------
+        lastPid = pid;
     }
 
-    // The parent must close its copies too (same EOF reason as above).
     for (int fd : pipeFds)
         close(fd);
     closeRedirects();
@@ -625,9 +575,7 @@ void Command::execute()
     {
         int status;
         pid_t r;
-        // EINTR -> retry. ECHILD is fine: the SIGCHLD handler already reaped
-        // (and logged) it. Whoever reaps a child is the one who logs it, so
-        // every child ends up in the log exactly once.
+
         while ((r = waitpid(lastPid, &status, 0)) < 0 && errno == EINTR)
             ;
         if (r == lastPid)
@@ -646,22 +594,16 @@ void Command::prompt()
 Command Command::_currentCommand;
 SimpleCommand *Command::_currentSimpleCommand;
 
-/* ------------------------------------------------------------------ */
-/* 4. main                                                             */
-/* ------------------------------------------------------------------ */
-
+// Main
 int main()
 {
-    // Ctrl-C must not kill the shell
+
     signal(SIGINT, SIG_IGN);
 
-    // log file; O_CLOEXEC so the children we exec don't inherit it
     logFd = open("myshell.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (logFd < 0)
         perror("myshell: cannot open myshell.log");
 
-    // log every terminated child. SA_RESTART: getline()/waitpid() are
-    // restarted automatically instead of failing with EINTR.
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = onChildExit;
@@ -673,7 +615,7 @@ int main()
     while (true)
     {
         Command::_currentCommand.prompt();
-        if (!std::getline(std::cin, input)) // Ctrl-D (EOF)
+        if (!std::getline(std::cin, input))
         {
             printf("\nGood bye!!\n");
             break;

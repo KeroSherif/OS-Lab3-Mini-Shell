@@ -1,12 +1,7 @@
 
 /*
- * 
- *
- * Template file.
- * You will need to add more code here to execute the command table.
- *
- * NOTE: You are responsible for fixing any bugs this code may have!
- *
+ * CC373 - Lab 3 : Mini shell
+ * Stage 2: base code with its bugs fixed (parsing and execution come next).
  */
 
 #include <stdio.h>
@@ -31,16 +26,10 @@
 
 void parse(std::vector<Token> &tokens)
 {
-    Command currentCommand;
-    SimpleCommand *currentSimpleCommand = new SimpleCommand();
+    (void)tokens; // parsing is added in the next commit
+    Command &currentCommand = Command::_currentCommand; // BUG FIX: use the real table, not a local copy
 
     currentCommand.execute();
-    /*
-      Implement this function 
-      you must parse for all possible tokens scenario
-      right now command.execute only print the format , you will inject it in your logic.
-
-    */
 }
 
 SimpleCommand::SimpleCommand()
@@ -69,13 +58,15 @@ Command::Command()
 {
     _numberOfAvailableSimpleCommands = 1;
     _simpleCommands = (SimpleCommand **)
-        malloc(_numberOfSimpleCommands * sizeof(SimpleCommand *));
+        malloc(_numberOfAvailableSimpleCommands * sizeof(SimpleCommand *)); // BUG FIX: was _numberOfSimpleCommands (uninitialised)
 
     _numberOfSimpleCommands = 0;
     _outFile = 0;
     _inputFile = 0;
     _errFile = 0;
     _background = 0;
+    _out_error = 0; // BUG FIX: was never initialised
+    _append = 0;    // BUG FIX: was never initialised
 }
 
 void Command::insertSimpleCommand(SimpleCommand *simpleCommand)
@@ -101,7 +92,7 @@ void Command::clear()
         }
 
         free(_simpleCommands[i]->_arguments);
-        free(_simpleCommands[i]);
+        delete _simpleCommands[i]; // BUG FIX: created with new -> delete, not free
     }
 
     if (_outFile)
@@ -124,6 +115,8 @@ void Command::clear()
     _inputFile = 0;
     _errFile = 0;
     _background = 0;
+    _out_error = 0;
+    _append = 0;
 }
 
 void Command::print()
@@ -141,6 +134,7 @@ void Command::print()
         {
             printf("\"%s\" \t", _simpleCommands[i]->_arguments[j]);
         }
+        printf("\n"); // one row per simple command
     }
 
     printf("\n\n");
@@ -154,26 +148,14 @@ void Command::print()
 
 void Command::execute()
 {
-    print();
-    /*
-        Write your code here
-    */
-
+    print(); // running the command is added in the next commits
     clear();
-    prompt();
 }
 
 void Command::prompt()
 {
     printf("myshell>");
     fflush(stdout);
-    std::string input;
-    while (true)
-    {
-        std::getline(std::cin, input); 
-        std::vector<Token> tokens = tokenize(input);
-        parse(tokens);
-    }
 }
 
 Command Command::_currentCommand;
@@ -181,6 +163,17 @@ SimpleCommand *Command::_currentSimpleCommand;
 
 int main()
 {
-    Command::_currentCommand.prompt();
+    std::string input;
+    while (true)
+    {
+        Command::_currentCommand.prompt();
+        if (!std::getline(std::cin, input)) // BUG FIX: Ctrl-D used to loop forever
+        {
+            printf("\nGood bye!!\n");
+            break;
+        }
+        std::vector<Token> tokens = tokenize(input);
+        parse(tokens);
+    }
     return 0;
 }

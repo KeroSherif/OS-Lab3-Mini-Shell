@@ -371,7 +371,40 @@ void Command::execute()
     print();
 #endif
 
-    // Part 1: only show the command table. Running it comes in the next commits.
+    int n = _numberOfSimpleCommands;
+    if (n == 0)
+    {
+        clear();
+        return;
+    }
+
+    if (n > 1)
+    {
+        fprintf(stderr, "myshell: pipes are not implemented yet\n");
+        clear();
+        return;
+    }
+
+    char **args = _simpleCommands[0]->_arguments;
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        perror("myshell: fork");
+    }
+    else if (pid == 0) // child: become the program
+    {
+        execvp(args[0], args);
+        // only reached if execvp failed
+        fprintf(stderr, "myshell: %s: %s\n", args[0], strerror(errno));
+        _exit(127); // _exit, not exit: don't flush the parent's copied stdio buffers
+    }
+    else if (!_background) // parent: wait only for foreground commands
+    {
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+            ;
+    }
+
     clear();
 }
 

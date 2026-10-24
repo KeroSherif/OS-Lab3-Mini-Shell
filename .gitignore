@@ -1,0 +1,8 @@
+myshell
+*.o
+myshell.log
+out
+out2
+output.txt
+err.txt
+input.txt
